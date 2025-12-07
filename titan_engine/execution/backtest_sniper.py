@@ -14,30 +14,30 @@ class BacktestSniperModule:
         self.history = [] # To store closed trades
         print(f"BacktestSniperModule Initialized. Initial Balance: ${initial_balance:,.2f}")
 
-    def open_trade(
+    def execute_trade(
         self,
         symbol: str,
-        trade_type: str,
-        lot_size: float,
+        direction: str,
+        volume: float,
         price: float,
-        stop_loss: float,
-        take_profit: float,
-        **kwargs # Ignore other live trading args
+        sl: float,
+        tp: float,
+        **kwargs
     ) -> Optional[Dict[str, Any]]:
         
         trade_details = {
             "ticket": self._next_ticket,
             "symbol": symbol,
-            "type": trade_type,
+            "type": direction,
             "entry_price": price,
-            "sl": stop_loss,
-            "tp": take_profit,
-            "volume": lot_size,
+            "sl": sl,
+            "tp": tp,
+            "volume": volume,
             "open_time": None, # Will be set by the backtester loop
             "pnl": 0.0,
         }
         self.open_positions[self._next_ticket] = trade_details
-        print(f"Backtest: Opened {trade_type} trade {self._next_ticket} for {symbol} @ {price:.5f}")
+        print(f"Backtest: Opened {direction} trade {self._next_ticket} for {symbol} @ {price:.5f}")
         self._next_ticket += 1
         return {"retcode": 0, "ticket": trade_details["ticket"]}
 

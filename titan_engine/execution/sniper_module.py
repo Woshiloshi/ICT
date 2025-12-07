@@ -27,7 +27,7 @@ class SniperModule:
 
         return fib_62 <= current <= fib_79
 
-    def send_order(self, symbol: str, volume: float, direction: str, sl: float, tp: float, comment: str = "TITAN"):
+    def execute_trade(self, symbol: str, volume: float, direction: str, sl: float, tp: float, comment: str = "TITAN", **kwargs):
         if self.demo_mode:
             print(f"[DEMO] {direction.upper()} {volume} {symbol} | Entry ~{mt5.symbol_info_tick(symbol).ask:.5f} | SL {sl:.5f} | TP {tp:.5f} | {comment}")
             return True
@@ -79,6 +79,6 @@ class SniperModule:
                 tp = entry_price + (entry_price - sl) * 3  # 1:3 RR
 
                 print(f"[SNIPER] CONFLUENCE FOUND → {direction.upper()} at OTE")
-                self.send_order("EURUSD", 0.1, direction, sl, tp, "TITAN_FVG_OB")
+                self.execute_trade("EURUSD", 0.1, direction, sl, tp, "TITAN_FVG_OB")
                 self.last_entry_time = time.time()
                 return

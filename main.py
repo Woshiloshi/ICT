@@ -75,12 +75,13 @@ class Bot:
         # 1. Update IPDA State Machine
         self.ipda.update(df, timestamp=timestamp)
         phase = self.ipda.current_phase.value
-        print(f"[IPDA] Current Phase → {phase}")
+        print(f"[{timestamp}] IPDA Phase: {phase}")
 
         # 2. Scan for PD Arrays
         self.market_scanner.scan(df)
         fvgs = self.market_scanner.get_active_fvgs()
         obs = self.market_scanner.get_active_obs()
+        print(f"[{timestamp}] Found {len(fvgs)} active FVGs and {len(obs)} active OBs.")
         
         pd_arrays = []
         for fvg in fvgs:
@@ -106,12 +107,14 @@ class Bot:
             obs_for_trade = [pda for pda in pd_arrays if pda['type'] == 'order_block']
 
             if fvgs_for_trade and obs_for_trade:
+                print(f"[{timestamp}] Confluence Found: FVG + OB. Checking direction...")
                 # Simple confluence: use the most recent FVG and OB
                 fvg = fvgs_for_trade[0]
                 ob = obs_for_trade[0]
                 
                 # Ensure they are for the same direction
                 if fvg['direction'] == ob['direction']:
+                    print(f"[{timestamp}] Directions match: {fvg['direction']}. Evaluating entry...")
                     direction = fvg['direction']
                     entry_price = fvg['price_level']
                     sl_price = ob['price_level']
@@ -123,17 +126,20 @@ class Bot:
                     else: # Bearish
                         stop_loss = sl_price + 0.00050 # A small buffer
                         take_profit = entry_price - (stop_loss - entry_price) * 2
-
-                    print(f"[SNIPER] Confluence Found: {direction.upper()} FVG + OB. Evaluating entry...")
                     
                     self.sniper.execute_trade(
                         symbol=self.symbol,
                         direction=direction,
                         volume=0.1, # Example lot size
-                        stop_loss=stop_loss,
-                        take_profit=take_profit
+                        price=entry_price,
+                        sl=stop_loss,
+                        tp=take_profit
                     )
                     self.sniper.last_entry_time = current_ts
+                else:
+                    print(f"[{timestamp}] Directions do not match: FVG({fvg['direction']}) vs OB({ob['direction']})")
+            else:
+                print(f"[{timestamp}] No confluence found: FVG({len(fvgs_for_trade)}) or OB({len(obs_for_trade)}) is missing.")
 
 
 
