@@ -6,7 +6,7 @@ from typing import Optional, Dict
 
 
 class MT5DataStream:
-    def __init__(self, symbol: str = "EURUSD", timeframe=mt5.TIMEFRAME_M5, bars: int = 500):
+    def __init__(self, symbol: str = "EURUSD", timeframe=mt5.TIMEFRAME_M1, bars: int = 500):
         self.symbol = symbol
         self.timeframe = timeframe
         self.bars = bars

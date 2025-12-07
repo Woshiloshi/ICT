@@ -15,7 +15,7 @@ class MarketPhase(Enum):
 class IPDAStateMachine:
     def __init__(self):
         self._current_phase: MarketPhase = MarketPhase.UNKNOWN
-        self._phase_start_time: datetime = datetime.utcnow()
+        self._phase_start_time: Optional[datetime] = None # Will be set on first update
         self._phase_data: Dict[str, Any] = {}
         self._last_price = None
         self._asian_high = None
@@ -25,31 +25,36 @@ class IPDAStateMachine:
     def current_phase(self) -> MarketPhase:
         return self._current_phase
 
-    @property
-    def phase_duration(self) -> float:
-        return (datetime.utcnow() - self._phase_start_time).total_seconds() / 60  # minutes
+    def phase_duration(self, current_timestamp: datetime) -> float:
+        if self._phase_start_time is None:
+            return 0.0
+        return (current_timestamp - self._phase_start_time).total_seconds() / 60  # minutes
 
-    def transition_to(self, new_phase: MarketPhase, data: Optional[Dict[str, Any]] = None):
+    def transition_to(self, new_phase: MarketPhase, data: Optional[Dict[str, Any]] = None, timestamp: Optional[datetime] = None):
         if not isinstance(new_phase, MarketPhase):
             raise TypeError("new_phase must be MarketPhase enum")
 
         if self._current_phase != new_phase:
             previous = self._current_phase.value
             self._current_phase = new_phase
-            self._phase_start_time = datetime.utcnow()
+            self._phase_start_time = timestamp if timestamp else datetime.utcnow() # Use provided timestamp
             self._phase_data = data or {}
-            print(f"[{datetime.utcnow().strftime('%H:%M:%S')}] IPDA → {previous} → {new_phase.value}")
+            print(f"[{self._phase_start_time.strftime('%H:%M:%S')}] IPDA → {previous} → {new_phase.value}")
         else:
             if data:
                 self._phase_data.update(data)
 
-    def update(self, df: pd.DataFrame, timestamp: Optional[datetime] = None):
+    def update(self, df: pd.DataFrame):
         """The brain of TITAN — called every bar"""
         if df.empty or len(df) < 50:
             return
 
-        current_time = timestamp if timestamp else datetime.utcnow()
+        current_time = df.index.max() # Use the latest timestamp from the dataframe
+        if self._phase_start_time is None: # Initialize on first update
+            self._phase_start_time = current_time
+
         current_hour = current_time.hour
+
 
         close = df['close'].iloc[-1]
         high = df['high'].iloc[-1]
@@ -66,7 +71,7 @@ class IPDAStateMachine:
                     "asian_high": self._asian_high,
                     "asian_low": self._asian_low,
                     "range_pips": round((self._asian_high - self._asian_low) / 0.0001, 1)
-                })
+                }, timestamp=current_time)
             return
 
         # === 2. LONDON MANIPULATION (07:00–10:00 UTC) ===
@@ -79,7 +84,7 @@ class IPDAStateMachine:
                         "raid": f"London {direction} Sweep",
                         "level": level,
                         "break_size_pips": round(abs(level - (self._asian_high if direction == "UP" else self._asian_low)) / 0.0001, 1)
-                    })
+                    }, timestamp=current_time)
                     return
 
         # === 3. RETRACEMENT (Pullback after Manipulation) ===
@@ -89,7 +94,7 @@ class IPDAStateMachine:
                 self.transition_to(MarketPhase.RETRACEMENT, {
                     "strength": "Strong",
                     "expected_zone": "FVG / OB Confluence"
-                })
+                }, timestamp=current_time)
                 return
 
         # === 4. DISTRIBUTION (Displacement Run) ===
@@ -101,12 +106,12 @@ class IPDAStateMachine:
                     "displacement": f"{trend} Run",
                     "pips_moved": round(move, 1),
                     "trigger": "Confirmed Trend"
-                })
+                }, timestamp=current_time)
 
-    def get_phase_info(self) -> Dict[str, Any]:
+    def get_phase_info(self, current_timestamp: datetime) -> Dict[str, Any]:
         return {
             "phase": self.current_phase.value,
-            "duration_min": round(self.phase_duration, 1),
+            "duration_min": round(self.phase_duration(current_timestamp), 1),
             "since_utc": self._phase_start_time.strftime("%H:%M:%S"),
             "data": self._phase_data
         }

@@ -1,179 +1,90 @@
-import time
-from typing import Dict, Any, Optional
 import MetaTrader5 as mt5
-from datetime import datetime
 import pandas as pd
+import pytz
+from typing import Optional, Dict, Any, Union
+from datetime import datetime, time, timedelta # Import time and timedelta
 
-# Core
-from titan_engine.core.time_keeper import TimeKeeper
-from titan_engine.core.ipda_state_machine import IPDAStateMachine, MarketPhase
-from titan_engine.core.macro_filters import NewsFilter
-from titan_engine.core.market_scanner import MarketScanner
-
-# Data
 from titan_engine.data.mt5_data_stream import MT5DataStream
 from titan_engine.data.backtest_data_stream import BacktestDataStream
-
-# Execution
-from titan_engine.execution.risk_warden import RiskWarden
 from titan_engine.execution.sniper_module import SniperModule
+from titan_engine.core.ipda_state_machine import IPDAStateMachine
 
 
 class Bot:
-    def __init__(self, symbol: str, timeframe: int, risk_per_trade: float, data_stream, sniper, is_backtest: bool = False):
+    def __init__(self, symbol: str, timeframe, risk_per_trade: float, data_stream: Union[MT5DataStream, BacktestDataStream], sniper: SniperModule):
         self.symbol = symbol
         self.timeframe = timeframe
         self.risk_per_trade = risk_per_trade
-        self.active_trades: Dict[int, Dict[str, Any]] = {}
-        self.is_backtest = is_backtest
-
-        print("[+] Initializing TITAN components...")
         self.data_stream = data_stream
         self.sniper = sniper
+        self.ipda = IPDAStateMachine() # Initialize the IPDA state machine
 
-        # Differentiate between live and backtest
-        if self.is_backtest:
-            # Backtesting mode, no MT5 connection
-            balance = self.sniper.balance
-            print("[+] TITAN initialized in Backtest Mode.")
-        else:
-            # Live trading mode
-            if not self.data_stream.is_connected:
-                raise ConnectionError("MT5 connection failed")
-            account = mt5.account_info()
-            if not account:
-                raise ConnectionError("Cannot read account info")
-            balance = account.balance
-            print(f"[+] TITAN initialized in Live Mode. Balance: ${balance:,.2f}")
+        self.asian_session_high: Optional[float] = None
+        self.asian_session_low: Optional[float] = None
+        self.asian_session_processed_date: Optional[datetime.date] = None
 
-        self.time_keeper = TimeKeeper(broker_timezone_str="Europe/Helsinki")
-        self.ipda = IPDAStateMachine()
-        self.market_scanner = MarketScanner()
-        self.warden = RiskWarden(account_balance=balance)
-        self.news_filter = NewsFilter()
+        print(f"[BOT] Initialized Bot for {self.symbol}")
 
-    def run(self, interval: int = 60, candle: Optional[pd.DataFrame] = None, timestamp: Optional[datetime] = None):
-        """
-        Main bot loop. Handles both live trading and backtesting.
-        """
-        if self.is_backtest:
-            if candle is None:
-                raise ValueError("Candle data must be provided for backtesting.")
-            # The backtester will feed data one candle at a time
-            self._process_candles(candle, timestamp)
-        else:
-            # Live trading loop
-            while True:
-                df = self.data_stream.get_latest_candles(self.symbol, self.timeframe, 100)
-                self._process_candles(df, datetime.utcnow())
-                time.sleep(interval)
-    
-    def _process_candles(self, df: pd.DataFrame, timestamp: Optional[datetime] = None):
-        """Shared logic for processing a dataframe of candles."""
-        current_ts = (timestamp or datetime.utcnow()).timestamp()
-
-        # 1. Update IPDA State Machine
-        self.ipda.update(df, timestamp=timestamp)
-        phase = self.ipda.current_phase.value
-        print(f"[{timestamp}] IPDA Phase: {phase}")
-
-        # 2. Scan for PD Arrays
-        self.market_scanner.scan(df)
-        fvgs = self.market_scanner.get_active_fvgs()
-        obs = self.market_scanner.get_active_obs()
-        print(f"[{timestamp}] Found {len(fvgs)} active FVGs and {len(obs)} active OBs.")
+    def run(self, interval: int = 0) -> Optional[Dict[str, Any]]:
+        # In a live scenario, this method would fetch new data and run the trading logic.
+        # For backtesting, data is fed by the backtester.
         
-        pd_arrays = []
-        for fvg in fvgs:
-            pd_arrays.append({
-                'type': 'fair_value_gap',
-                'direction': fvg.direction,
-                'price_level': (fvg.low + fvg.high) / 2 # Midpoint for display
-            })
-        for ob in obs:
-            pd_arrays.append({
-                'type': 'order_block',
-                'direction': ob.direction,
-                'price_level': ob.price
-            })
+        # Get the latest data (window) from the data stream
+        # This will work for both MT5DataStream and BacktestDataStream
+        window = self.data_stream.get_latest_candles(self.symbol, self.timeframe, count=100)
+        
+        if not window.empty:
+            # Current time based on the latest candle in the window
+            current_time = window.index.max()
+            # current_time is already UTC-aware due to fix in backtester.py
 
-        # 3. Execute Trades based on Confluence
-        if self.ipda.current_phase == MarketPhase.RETRACEMENT and pd_arrays:
-            # Simple cooldown to avoid over-trading
-            if current_ts - self.sniper.last_entry_time < self.sniper.cooldown:
-                return
-
-            fvgs_for_trade = [pda for pda in pd_arrays if pda['type'] == 'fair_value_gap']
-            obs_for_trade = [pda for pda in pd_arrays if pda['type'] == 'order_block']
-
-            if fvgs_for_trade and obs_for_trade:
-                print(f"[{timestamp}] Confluence Found: FVG + OB. Checking direction...")
-                # Simple confluence: use the most recent FVG and OB
-                fvg = fvgs_for_trade[0]
-                ob = obs_for_trade[0]
+            # Process Asian Session liquidity once per day
+            if self.sniper.time_keeper.is_asian_session_active() and current_time.date() != self.asian_session_processed_date:
+                # Convert current_time to broker's timezone for accurate hour check
+                broker_current_time = current_time.tz_convert(self.sniper.time_keeper.broker_tz)
                 
-                # Ensure they are for the same direction
-                if fvg['direction'] == ob['direction']:
-                    print(f"[{timestamp}] Directions match: {fvg['direction']}. Evaluating entry...")
-                    direction = fvg['direction']
-                    entry_price = fvg['price_level']
-                    sl_price = ob['price_level']
-                    
-                    # Define SL and TP (e.g., SL at OB price, TP at 1:2 RR)
-                    if direction == 'bullish':
-                        stop_loss = sl_price - 0.00050 # A small buffer
-                        take_profit = entry_price + (entry_price - stop_loss) * 2
-                    else: # Bearish
-                        stop_loss = sl_price + 0.00050 # A small buffer
-                        take_profit = entry_price - (stop_loss - entry_price) * 2
-                    
-                    self.sniper.execute_trade(
-                        symbol=self.symbol,
-                        direction=direction,
-                        volume=0.1, # Example lot size
-                        price=entry_price,
-                        sl=stop_loss,
-                        tp=take_profit
-                    )
-                    self.sniper.last_entry_time = current_ts
-                else:
-                    print(f"[{timestamp}] Directions do not match: FVG({fvg['direction']}) vs OB({ob['direction']})")
-            else:
-                print(f"[{timestamp}] No confluence found: FVG({len(fvgs_for_trade)}) or OB({len(obs_for_trade)}) is missing.")
+                # Calculate start and end of Asian session for the relevant period
+                # Asian Session is 19:00 NY (prev day) to 02:00 NY (current day)
+                
+                # Determine the date component for Asian session start/end in NY time
+                asian_end_ny_date = broker_current_time.date()
+                if broker_current_time.hour < 2: # Before 2 AM NY, so it's the Asian session ending today
+                    asian_start_ny_date = broker_current_time.date() - timedelta(days=1)
+                else: # 2 AM NY or later, so it's the Asian session of previous day that is relevant
+                    asian_start_ny_date = broker_current_time.date()
 
+                asian_start_time_ny = self.sniper.time_keeper.broker_tz.localize(datetime.combine(asian_start_ny_date, time(19, 0)))
+                asian_end_time_ny = self.sniper.time_keeper.broker_tz.localize(datetime.combine(asian_end_ny_date + timedelta(days=1), time(2, 0)))
 
+                # Convert to UTC for filtering historical_data (which is UTC-indexed)
+                asian_start_time_utc = asian_start_time_ny.astimezone(pytz.UTC)
+                asian_end_time_utc = asian_end_time_ny.astimezone(pytz.UTC)
+                
+                asian_session_window = self.data_stream.historical_data.loc[asian_start_time_utc:asian_end_time_utc]
+                
+                print(f"[BOT DEBUG] Current Time (UTC): {current_time}")
+                print(f"[BOT DEBUG] Current Time (NY): {broker_current_time}")
+                print(f"[BOT DEBUG] Asian Session UTC Range: {asian_start_time_utc} to {asian_end_time_utc}")
+                print(f"[BOT DEBUG] Asian Session Window Empty: {asian_session_window.empty}")
+                if not asian_session_window.empty:
+                    print(f"[BOT DEBUG] Asian Session Window Head:\n{asian_session_window.head(2)}")
+                    print(f"[BOT DEBUG] Asian Session Window Tail:\n{asian_session_window.tail(2)}")
+                    is_range_bound_result = self.sniper.scanner.is_range_bound(asian_session_window)
+                    print(f"[BOT DEBUG] Is Asian Session Range Bound: {is_range_bound_result}")
+                    if is_range_bound_result:
+                        liquidity_pools = self.sniper.scanner.get_liquidity_pools(asian_session_window)
+                        print(f"[BOT DEBUG] Asian Session Liquidity Pools: {liquidity_pools}")
+                        if liquidity_pools["highs"]:
+                            self.asian_session_high = max(liquidity_pools["highs"])
+                        if liquidity_pools["lows"]:
+                            self.asian_session_low = min(liquidity_pools["lows"])
+                        self.asian_session_processed_date = current_time.date() # Mark as processed for this day (UTC day)
+                        print(f"[BOT] Asian Session Liquidity: High={self.asian_session_high}, Low={self.asian_session_low} for {self.asian_session_processed_date}")
 
-def main():
-    print("=" * 70)
-    print("          PROJECT TITAN — ICT NARRATIVE ENGINE")
-    print("                  LIVE TRADING MODE v1.0")
-    print("=" * 70)
+            # Update the IPDA state machine with the latest data
+            self.ipda.update(window)
 
-    data_stream = None
-    try:
-        data_stream = MT5DataStream()
-        sniper = SniperModule(demo_mode=True)
-
-        bot = Bot(
-            symbol="EURUSD",
-            timeframe=mt5.TIMEFRAME_M5,
-            risk_per_trade=0.5,
-            data_stream=data_stream,
-            sniper=sniper,
-            is_backtest=False
-        )
-        bot.run(interval=10)
-
-    except Exception as e:
-        print(f"FATAL: {e}")
-    finally:
-        if data_stream and data_stream.is_connected:
-            print("\nShutting down MT5...")
-            data_stream.shutdown()
-            mt5.shutdown()
-        print("TITAN offline.")
-
-
-
-if __name__ == "__main__":
-    main()
+            # Run the sniper module's hunting logic
+            trade = self.sniper.hunt(window, self.ipda.current_phase)
+            return trade
+        return None

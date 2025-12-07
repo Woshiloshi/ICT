@@ -1,5 +1,6 @@
 import pandas as pd
 from typing import Optional
+from datetime import datetime # Added import
 
 class BacktestDataStream:
     def __init__(self, historical_data: pd.DataFrame):
@@ -34,3 +35,14 @@ class BacktestDataStream:
         """No real connection to shut down in backtesting."""
         self.is_connected = False
         print("[BACKTEST DATA] Stream finished.")
+
+    def get_all_candles_for_current_day(self, current_time: datetime) -> pd.DataFrame:
+        """
+        Returns all candles for the day of the given current_time.
+        """
+        if self.historical_data.empty:
+            return pd.DataFrame()
+        
+        # Filter data for the current day
+        current_day_data = self.historical_data[self.historical_data.index.date == current_time.date()]
+        return current_day_data
