@@ -70,6 +70,8 @@ class Bot:
     
     def _process_candles(self, df: pd.DataFrame, timestamp: Optional[datetime] = None):
         """Shared logic for processing a dataframe of candles."""
+        current_ts = (timestamp or datetime.utcnow()).timestamp()
+
         # 1. Update IPDA State Machine
         self.ipda.update(df, timestamp=timestamp)
         phase = self.ipda.current_phase.value
@@ -97,7 +99,7 @@ class Bot:
         # 3. Execute Trades based on Confluence
         if self.ipda.current_phase == MarketPhase.RETRACEMENT and pd_arrays:
             # Simple cooldown to avoid over-trading
-            if time.time() - self.sniper.last_entry_time < self.sniper.cooldown:
+            if current_ts - self.sniper.last_entry_time < self.sniper.cooldown:
                 return
 
             fvgs_for_trade = [pda for pda in pd_arrays if pda['type'] == 'fair_value_gap']
@@ -131,7 +133,7 @@ class Bot:
                         stop_loss=stop_loss,
                         take_profit=take_profit
                     )
-                    self.sniper.last_entry_time = time.time()
+                    self.sniper.last_entry_time = current_ts
 
 
 
